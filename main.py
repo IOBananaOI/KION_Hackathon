@@ -56,8 +56,9 @@ print("Step 4 done.")
 #### Step 5: Get captions
 
 
-captions = get_captions(SCENES_PATH, 22)
+captions = get_captions(SCENES_PATH, scenes_count)
 print("Step 5 done.")
+print(captions)
 
 
 #### Step 6: Convert text captions to voice captions
@@ -67,6 +68,7 @@ for i, caption in enumerate(captions):
     myobj.save(VOICE_CAPTION_DIR+f"Scene_cap_{i+1}.mp3") 
 
 print("Step 6 done.")
+
 
 
 #### Step 7: Composite original scenes with voice captions

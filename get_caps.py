@@ -17,7 +17,7 @@ import torchvision.transforms as transforms
 from torchvision.models import resnet101
 
 
-def extract_features(video_path, frames_count_lim=150):
+def extract_features(video_path, frames_count_lim=60):
     device = torch.device('cpu')
 
     model = nn.Sequential(*list(resnet101(weights='DEFAULT').children())[:-1])
@@ -37,19 +37,19 @@ def extract_features(video_path, frames_count_lim=150):
         success, image = vidObj.read() 
         if success:
             RGBimage = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-            if count%10 == 0:            #Sample 1 frame per 10 frames
-                    frames.append(data_transform(RGBimage))
+            
+            frames.append(data_transform(RGBimage))
             count += 1
         else:
             fail += 1
     vidObj.release()
 
-    if count > frames_count_lim:
-        frames = frames[:frames_count_lim]
+    frames = torch.stack(frames).to(device)
+    interval = count//frames_count_lim
+    frames = frames[range(0,interval*frames_count_lim,interval)]
 
-    frames = torch.stack(frames)
-    
     with torch.no_grad():
+
         output_features = model(frames).unsqueeze(0)
     
     return output_features, len(frames)
@@ -75,12 +75,12 @@ def get_captions(scenes_path: str, scenes_count) -> list:
     #Model object
 
     model = SALSTM(voc,cfg,path)
-    model.load_state_dict(torch.load("epochs_81.pth"))
+    model.load_state_dict(torch.load("epochs_470.pth"))
     model.eval()
 
     features_list = []
     for i in range(scenes_count):
-        features, features_count = extract_features(f"Scene{i+1}.mp4")
+        features, features_count = extract_features(f"{scenes_path}Scene{i+1}.mp4")
         features = features.view(1, features_count, 2048)
         features_list.append(features)
 
