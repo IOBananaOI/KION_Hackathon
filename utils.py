@@ -1,5 +1,5 @@
 from typing import Tuple, List
-from os import listdir
+from os import listdir, unlink
 from os.path import isfile, join
 
 from scenedetect import open_video, ContentDetector, SceneManager
@@ -11,101 +11,44 @@ from numpy.linalg import norm
 from scipy.spatial.distance import pdist, squareform
 
 import torch
-
 from torchvision.models import resnet101
 from torch import nn
 
 from PIL import Image
 
-import cv2
-import random
-import unicodedata
+from gtts import gTTS
+
+import matplotlib.pyplot as plt
+import seaborn as sns
+import datetime
+from time import time
 
 
-class Utils:
-    '''
-    Generic utility functions that our model and dataloader would require
+global worktime
+global funcs
 
-    '''
-   
-    @staticmethod
-    def set_seed(seed):
-        '''
-          For reproducibility 
-        '''
-        random.seed(seed)
-        np.random.seed(seed)
-        torch.manual_seed(seed)
-        torch.cuda.manual_seed_all(seed)
-
-    @staticmethod
-    def unicodeToAscii(s):
-        '''
-        Turn a Unicode string to plain ASCII, 
-        Thanks to https://stackoverflow.com/a/518232/2809427
-        '''
-        return ''.join(
-            c for c in unicodedata.normalize('NFD', s)
-            if unicodedata.category(c) != 'Mn'
-        )
-
-    @staticmethod
-    def target_tensor_to_caption(voc,target):
-        '''
-        Convert target tensor to Caption
-        '''
-        gnd_trh = []
-        lend = target.size()[1]
-        for i in range(lend):
-            tmp = ' '.join(voc.index2word[x.item()] for x in target[:,i])
-            gnd_trh.append(tmp)
-        return gnd_trh
-
-    @staticmethod
-    def maskNLLLoss(inp, target, mask, device):
-        '''
-        Masked cross-entropy loss calculation; 
-        refers: https://pytorch.org/tutorials/beginner/chatbot_tutorial.html
-        '''
-        inp = inp.squeeze(0)
-        nTotal = mask.sum()
-        crossEntropy = -torch.log(torch.gather(inp.squeeze(0), 1, target.view(-1, 1)).squeeze(1).float())
-        loss = crossEntropy.masked_select(mask).mean()
-        loss = loss.to(device)
-        return loss, nTotal.item()
- 
-    @staticmethod
-    def FrameCapture(video_path, video_name):
-        '''
-        Function to extract frames
-        For MSVD Sample every 10th frame
-        '''
-        
-        #video_path = video_path_dict[video_name]
-        # Path to video file 
-        video_path = video_path+video_name  #Changes
-        vidObj = cv2.VideoCapture(video_path) 
-        count = 0
-        fail = 0
-        # checks whether frames were extracted 
-        success = 1
-        frames = []
-        while success: 
-            # OpenCV Uses BGR Colormap
-            success, image = vidObj.read() 
-            try:
-                RGBimage = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-                if count%10 == 0:            #Sample 1 frame per 10 frames
-                    frames.append(RGBimage)
-                count += 1
-            except:
-                fail += 1
-        vidObj.release()
-        if count > 80:
-            frames = frames[:81]
-        return np.stack(frames[:-1]),count-1, fail
+worktime = [0] * 8
+funcs = [''] * 8
 
 
+def benchmark(func):
+    def wrapper(*args, **kwargs):
+        start = time()
+        result = func(*args, **kwargs)
+        end = time()
+
+        worktime[benchmark.counter] = end - start
+        funcs[benchmark.counter] = func.__name__
+        benchmark.counter += 1
+
+
+        return result
+
+    return wrapper
+
+benchmark.counter = 0
+
+@benchmark
 def get_shots(video_path, threshold=27.0, show_progress=False):
     """Returns a list of start/end timecode and frames pairs for each shot that was found. """
 
@@ -119,7 +62,7 @@ def get_shots(video_path, threshold=27.0, show_progress=False):
     shots = scene_manager.get_scene_list()
     return shots
     
-
+@benchmark
 def save_images_from_shots(shots, video_path, img_out_path, show_progress=False):
     video = open_video(video_path)
     save_images(shots, video, num_images=1, output_dir=img_out_path, show_progress=show_progress)
@@ -208,7 +151,7 @@ def get_intervals_from_borders(borders: np.ndarray) -> List[List[Tuple[int, int]
         prev_border = cur_border
     return intervals
 
-
+@benchmark
 def get_scenes(img_path):
     """Returns start/end shots index pairs for each scene."""
 
@@ -242,31 +185,75 @@ def get_scenes(img_path):
     return scenes_shots_idx
 
 
+@benchmark
 def cut_video(video_path: str, scenes_save_path: str, scenes_intervals: list)-> None:
 
     for i, interval in enumerate(scenes_intervals):
         video = VideoFileClip(video_path).subclip(interval[0], interval[1])
-        video.write_videofile(f"{scenes_save_path}Scene{i+1}.mp4", fps=24)
+        video.write_videofile(f"{scenes_save_path}Scene_{i+1}.mp4", fps=24)
 
 
-def scenes_composite(scenes_path: str, voices_path: str, resulting_path: str, scenes_count: int) -> None:
+@benchmark
+def txt_cap2voice_cap(captions, VOICE_CAPTION_DIR):
+
+    for i, caption in enumerate(captions):
+        myobj = gTTS(text=caption, lang='en', slow=False) 
+        myobj.save(VOICE_CAPTION_DIR+f"Scene_{i+1}_cap.mp3") 
+
+
+def scene_composite(scenes_path: str, voices_path: str, resulting_path: str, scene_name: str) -> None:
     """
-    Composite scenes with corresponding voice captions.
+    Composite scene with corresponding voice caption.
     """
 
-    for i in range(scenes_count):
-        my_clip = VideoFileClip(f'{scenes_path}Scene{i+1}.mp4')
+    scene = VideoFileClip(f'{scenes_path + scene_name}.mp4')
+    audio_background = AudioFileClip(f'{voices_path + scene_name}_cap.mp3')
+    
+    scene = concatenate_videoclips([scene.subclip(0, audio_background.duration).fx(afx.volumex, 0.5), scene.subclip(audio_background.duration, scene.duration)])
 
-        audio_background = AudioFileClip(f'{voices_path}Scene_cap_{i+1}.mp3')
-        my_clip = concatenate_videoclips([my_clip.subclip(0, audio_background.duration).fx(afx.volumex, 0.5), my_clip.subclip(audio_background.duration, my_clip.duration)])
-
-        final_audio = CompositeAudioClip([audio_background, my_clip.audio]) 
-        final_clip = my_clip.set_audio(final_audio)
-        final_clip.write_videofile(f'{resulting_path}resulting_scene_{i+1}.mp4')
+    final_audio = CompositeAudioClip([audio_background, scene.audio]) 
+    final_clip = scene.set_audio(final_audio)
+    final_clip.write_videofile(f'{resulting_path}Resulting_{scene_name}.mp4')
 
 
+def wrapped_scene_composition(*args, **kwargs):
+    return benchmark(scene_composite)(*args, **kwargs)
+
+
+@benchmark
 def concatenate_scenes(scenes_path: str, video_path: str, scenes_count: int) -> None:
-    res_scenes = [VideoFileClip(f'{scenes_path}resulting_scene_{i+1}.mp4') for i in range(scenes_count)]
+    res_scenes = [VideoFileClip(f'{scenes_path}Resulting_Scene_{i+1}.mp4') for i in range(scenes_count)]
     
     final_film = concatenate_videoclips(res_scenes)
     final_film.write_videofile("videos/Final.mp4")
+
+
+def files_clear() -> None:
+    """
+    Dirs to clear: images, results, scenes, voice captions
+    """
+
+    folders = ['images', 'results', 'scenes', 'voice_captions']
+    for folder in folders:
+        for filename in listdir(folder):
+            file_path = join(folder, filename)
+            try:
+                if isfile(file_path):
+                    unlink(file_path)
+            except Exception as e:
+                print('Failed to delete %s. Reason: %s' % (file_path, e))
+
+
+def export_worktime(worktime: List[int],  funcs: List[str]) -> None:
+
+    colors = sns.color_palette('pastel')[0:5]
+
+    def func(pct, allvalues):
+        absolute = int(pct / 100.*np.sum(allvalues))
+        return "{:.1f}%\n{:d} sec".format(pct, absolute)
+
+    plt.pie(worktime, labels = funcs, colors = colors, autopct=lambda pct: func(pct, worktime))
+
+    today = datetime.datetime.today()
+
+    plt.savefig(f'diagrams/{today.strftime("%Y-%m-%d-%H.%M.%S")}.jpg')

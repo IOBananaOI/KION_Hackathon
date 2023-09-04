@@ -1,91 +1,55 @@
-import os
-# from features_extraction import extract_features
-
 import warnings
 warnings.filterwarnings('ignore')
 
-from config import Path
-from dictionary import Vocabulary
-
-from config import ConfigSALSTM
-from models.SA_LSTM.model import SALSTM
-
-import cv2
 import torch
-from torch import nn
-import torchvision.transforms as transforms
-from torchvision.models import resnet101
 
+import av
+import numpy as np
+from transformers import AutoImageProcessor, AutoTokenizer, VisionEncoderDecoderModel
 
-def extract_features(video_path, frames_count_lim=60):
-    device = torch.device('cpu')
+from utils import benchmark
 
-    model = nn.Sequential(*list(resnet101(weights='DEFAULT').children())[:-1])
-    model = model.to(device)
-    model.eval()
+@benchmark
+def get_captions(scenes_path: str, scenes_count: int) -> list:
 
-    data_transform = transforms.Compose([transforms.ToPILImage(),transforms.Resize((299,299)),transforms.ToTensor(),
-                                    transforms.Normalize([0.485, 0.456, 0.406],[0.229, 0.224, 0.225],inplace=True)])
+    device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    vidObj = cv2.VideoCapture(video_path) 
-    count = 0
-    success = 1
-    frames = []
-    fail = 0
-    while success: 
-        # OpenCV Uses BGR Colormap
-        success, image = vidObj.read() 
-        if success:
-            RGBimage = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-            
-            frames.append(data_transform(RGBimage))
-            count += 1
-        else:
-            fail += 1
-    vidObj.release()
+    # model import 
+    image_processor = AutoImageProcessor.from_pretrained("MCG-NJU/videomae-base")
+    tokenizer = AutoTokenizer.from_pretrained("gpt2")
+    model = VisionEncoderDecoderModel.from_pretrained("Neleac/timesformer-gpt2-video-captioning").to(device)
 
-    frames = torch.stack(frames).to(device)
-    interval = count//frames_count_lim
-    frames = frames[range(0,interval*frames_count_lim,interval)]
+    captions_list = []
 
-    with torch.no_grad():
-
-        output_features = model(frames).unsqueeze(0)
-    
-    return output_features, len(frames)
-
-
-def get_captions(scenes_path: str, scenes_count) -> list:
-
-    #create SALSTM config object
-    cfg = ConfigSALSTM(opt_encoder=True)
-    cfg.dataset = 'msrvtt'
-    cfg.dropout = 0.5
-    cfg.opt_param_init = False
-
-    #creation of path object
-    path = Path(cfg,os.getcwd())
-    #Vocabulary object, 
-    voc = Vocabulary(cfg)
-    voc.load()
-
-    min_count = 5 #remove all words below count min_count
-    voc.trim(min_count=min_count)
-
-    #Model object
-
-    model = SALSTM(voc,cfg,path)
-    model.load_state_dict(torch.load("epochs_470.pth"))
-    model.eval()
-
-    features_list = []
     for i in range(scenes_count):
-        features, features_count = extract_features(f"{scenes_path}Scene{i+1}.mp4")
-        features = features.view(1, features_count, 2048)
-        features_list.append(features)
+        # load scene
+        video_path = f"{scenes_path}Scene{i+1}.mp4"
+        container = av.open(video_path)
 
-    features_batch = torch.cat(features_list, dim=0)
+        # extract evenly spaced frames from scene
+        seg_len = container.streams.video[0].frames
+        clip_len = model.config.encoder.num_frames
+        indices = set(np.linspace(0, seg_len, num=clip_len, endpoint=False).astype(np.int64))
+        frames = []
+        container.seek(0)
+        for i, frame in enumerate(container.decode(video=0)):
+            if i in indices:
+                frames.append(frame.to_ndarray(format="rgb24"))
 
-    beam_txt_captions = model.BeamDecoding(features_batch.to(cfg.device), 10)
+        # generate caption
+        gen_kwargs = {
+            "min_length": 10, 
+            "max_length": 30, 
+            "num_beams": 8,
+        }
+        
+        pixel_values = image_processor(frames, return_tensors="pt").pixel_values.to(device)
+        tokens = model.generate(pixel_values, **gen_kwargs)
+        caption = tokenizer.batch_decode(tokens, skip_special_tokens=True)[0]
+        
+        captions_list.append(caption)
 
-    return beam_txt_captions
+
+    return captions_list
+
+    
